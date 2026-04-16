@@ -29,67 +29,61 @@ export default function LoginPage({ onLogin }) {
   }
 
   return (
-    <div style={styles.root}>
-      {/* Фоновая сетка */}
-      <div style={styles.grid} />
-      {/* Сканирующая линия */}
-      <div style={styles.scanLine} />
+      <div style={styles.root}>
+        {/* Фоновая сетка */}
+        <div style={styles.grid} />
+        {/* Сканирующая линия */}
+        <div style={styles.scanLine} />
 
-      <div style={{
-        ...styles.card,
-        opacity: mounted ? 1 : 0,
-        transform: mounted ? 'translateY(0)' : 'translateY(20px)',
-        animation: shaking ? 'shake 0.4s ease' : 'none',
-        transition: 'opacity 0.5s ease, transform 0.5s ease'
-      }}>
-        {/* Лого */}
-        <div style={styles.logo}>
-          <EyeIcon />
-          <span style={styles.logoText}>EYE<span style={styles.logoAccent}>RESEARCH</span></span>
+        <div style={{
+          ...styles.card,
+          opacity: mounted ? 1 : 0,
+          transform: mounted ? 'translateY(0)' : 'translateY(20px)',
+          animation: shaking ? 'shake 0.4s ease' : 'none',
+          transition: 'opacity 0.5s ease, transform 0.5s ease'
+        }}>
+
+
+          <div style={styles.divider}>
+            <span style={styles.dividerLine} />
+            <span style={styles.dividerText}>АВТОРИЗАЦИЯ</span>
+            <span style={styles.dividerLine} />
+          </div>
+
+          <form onSubmit={handleSubmit} style={styles.form}>
+            <Field
+                label="ЛОГИН"
+                value={login}
+                onChange={e => setLogin(e.target.value)}
+                placeholder="введите логин"
+                autoFocus
+            />
+            <Field
+                label="ПАРОЛЬ"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="••••••••"
+                type="password"
+            />
+
+            {error && (
+                <div style={styles.error}>
+                  <span style={styles.errorDot} />
+                  {error}
+                </div>
+            )}
+
+            <button type="submit" style={styles.btn}>
+              ВОЙТИ В СИСТЕМУ →
+            </button>
+          </form>
+
+          <div style={styles.hint}>
+            Демо-доступ: <span style={styles.hintCode}>admin / admin</span>
+          </div>
         </div>
 
-        <div style={styles.tagline}>UX Eye Tracking Platform v1.0</div>
-
-        <div style={styles.divider}>
-          <span style={styles.dividerLine} />
-          <span style={styles.dividerText}>АВТОРИЗАЦИЯ</span>
-          <span style={styles.dividerLine} />
-        </div>
-
-        <form onSubmit={handleSubmit} style={styles.form}>
-          <Field
-            label="ЛОГИН"
-            value={login}
-            onChange={e => setLogin(e.target.value)}
-            placeholder="введите логин"
-            autoFocus
-          />
-          <Field
-            label="ПАРОЛЬ"
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            placeholder="••••••••"
-            type="password"
-          />
-
-          {error && (
-            <div style={styles.error}>
-              <span style={styles.errorDot} />
-              {error}
-            </div>
-          )}
-
-          <button type="submit" style={styles.btn}>
-            ВОЙТИ В СИСТЕМУ →
-          </button>
-        </form>
-
-        <div style={styles.hint}>
-          Демо-доступ: <span style={styles.hintCode}>admin / admin</span>
-        </div>
-      </div>
-
-      <style>{`
+        <style>{`
         @keyframes shake {
           0%, 100% { transform: translateX(0); }
           20%       { transform: translateX(-8px); }
@@ -112,35 +106,35 @@ export default function LoginPage({ onLogin }) {
           box-shadow: 0 0 24px var(--mint-glow) !important;
         }
       `}</style>
-    </div>
+      </div>
   )
 }
 
 function Field({ label, value, onChange, placeholder, type = 'text', autoFocus }) {
   return (
-    <div style={{ marginBottom: 20 }}>
-      <label style={styles.label}>{label}</label>
-      <input
-        className="login-field"
-        type={type}
-        value={value}
-        onChange={onChange}
-        placeholder={placeholder}
-        autoFocus={autoFocus}
-        style={styles.input}
-      />
-    </div>
+      <div style={{ marginBottom: 20 }}>
+        <label style={styles.label}>{label}</label>
+        <input
+            className="login-field"
+            type={type}
+            value={value}
+            onChange={onChange}
+            placeholder={placeholder}
+            autoFocus={autoFocus}
+            style={styles.input}
+        />
+      </div>
   )
 }
 
 function EyeIcon() {
   return (
-    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-      <ellipse cx="16" cy="16" rx="14" ry="9" stroke="#3dffa0" strokeWidth="1.5"/>
-      <circle cx="16" cy="16" r="5" stroke="#3dffa0" strokeWidth="1.5"/>
-      <circle cx="16" cy="16" r="2" fill="#3dffa0"/>
-      <circle cx="17.5" cy="14.5" r="0.8" fill="white" opacity="0.8"/>
-    </svg>
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+        <ellipse cx="16" cy="16" rx="14" ry="9" stroke="#3dffa0" strokeWidth="1.5"/>
+        <circle cx="16" cy="16" r="5" stroke="#3dffa0" strokeWidth="1.5"/>
+        <circle cx="16" cy="16" r="2" fill="#3dffa0"/>
+        <circle cx="17.5" cy="14.5" r="0.8" fill="white" opacity="0.8"/>
+      </svg>
   )
 }
 

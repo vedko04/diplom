@@ -26,35 +26,26 @@ export default function CalibrationPage({ onComplete }) {
 
   // ── Инициализация WebGazer ─────────────────────────────────────
   const initWebGazer = useCallback(async () => {
-    if (!window.webgazer) {
-      setCamError('WebGazer не загружен')
-      return
-    }
+    if (!window.webgazer) return;
 
     try {
-      // Ждём готовности DOM
-      await new Promise(res => setTimeout(res, 300))
+      // Запуск движка
+      await window.webgazer.begin();
 
-      await window.webgazer
-          .setRegression('ridge')
-          .setTracker('TFFacemesh')
-          .setGazeListener(() => {})
-          .begin()
+      // Отключаем всё лишнее программно
+      window.webgazer.showVideoPreview(false);
+      window.webgazer.showPredictionPoints(false);
+      window.webgazer.applyKalmanFilter(true);
 
-      // Настройки для улучшения производительности
-      window.webgazer.showVideoPreview(true)
-      window.webgazer.showPredictionPoints(false)
+      // Принудительно прячем контейнер, если он создался
+      const container = document.getElementById('webgazerVideoContainer');
+      if (container) container.style.display = 'none';
 
-      // Применяем фильтр Калмана для сглаживания
-      window.webgazer.applyKalmanFilter(true)
-
-      setCamOk(true)
-      setWgReady(true)
+      setCamOk(true);
     } catch (err) {
-      console.error(err)
-      setCamError(`Ошибка: ${err.message}`)
+      console.error("Ошибка камеры:", err);
     }
-  }, [])
+  }, []);
 
   // ── Клик по точке калибровки ───────────────────────────────────
   const handlePointClick = useCallback((point, e) => {
@@ -97,12 +88,10 @@ export default function CalibrationPage({ onComplete }) {
 
   return (
       <div style={styles.root}>
-        {/* ── ВСТУПИТЕЛЬНЫЙ ЭКРАН ── */}
+
         {phase === 'intro' && (
             <div style={styles.introCard}>
-              <div style={styles.eyeAnim}>
-                <AnimatedEye />
-              </div>
+
               <h1 style={styles.title}>Калибровка трекера взгляда</h1>
               <p style={styles.desc}>
                 Для точного отслеживания взгляда необходимо настроить систему.

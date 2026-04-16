@@ -7,28 +7,14 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
-    <style>
-      #webgazerVideoContainer,
-      #webgazerVideoFeed,
-      #webgazerFaceOverlay,
-      #webgazerFaceFeedbackBox,
-      #webgazerCanvas,
-      .webgazer_prediction_dot {
-        display: none !important;
-        visibility: hidden !important;
-        opacity: 0 !important;
-        pointer-events: none !important;
-        position: fixed !important;
-        top: -9999px !important;
-      }
-    </style>
+    <!-- WebGazer CDN — грузим один раз, SPA не перезагружает страницу -->
+    <script src="/webgazer.js" type="text/javascript"></script>
+
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
-    <script src="/webgazer.js" defer></script>
-    <script src="
-https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.min.js
-"></script>
+
   </body>
+
 </html>
