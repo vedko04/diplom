@@ -1,436 +1,561 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import '../../src/styles/global.css'
 
-// 9 точек калибровки — 3×3 сетка (в % от экрана)
+// ── 16 точек калибровки — 4×4 сетка ─────────────────────────────────────────
+// Края экрана намеренно чуть отступают (8%) чтобы точки были кликабельны
 const CALIBRATION_POINTS = [
-  { id: 0, xPct: 10, yPct: 10 },
-  { id: 1, xPct: 50, yPct: 10 },
-  { id: 2, xPct: 90, yPct: 10 },
-  { id: 3, xPct: 10, yPct: 50 },
-  { id: 4, xPct: 50, yPct: 50 },
-  { id: 5, xPct: 90, yPct: 50 },
-  { id: 6, xPct: 10, yPct: 90 },
-  { id: 7, xPct: 50, yPct: 90 },
-  { id: 8, xPct: 90, yPct: 90 },
+  { id:  0, xPct:  8, yPct:  8 },
+  { id:  1, xPct: 35, yPct:  8 },
+  { id:  2, xPct: 65, yPct:  8 },
+  { id:  3, xPct: 92, yPct:  8 },
+  { id:  4, xPct:  8, yPct: 35 },
+  { id:  5, xPct: 35, yPct: 35 },
+  { id:  6, xPct: 65, yPct: 35 },
+  { id:  7, xPct: 92, yPct: 35 },
+  { id:  8, xPct:  8, yPct: 65 },
+  { id:  9, xPct: 35, yPct: 65 },
+  { id: 10, xPct: 65, yPct: 65 },
+  { id: 11, xPct: 92, yPct: 65 },
+  { id: 12, xPct:  8, yPct: 92 },
+  { id: 13, xPct: 35, yPct: 92 },
+  { id: 14, xPct: 65, yPct: 92 },
+  { id: 15, xPct: 92, yPct: 92 },
 ]
 
-const CLICKS_REQUIRED = 3  // увеличено до 3 для лучшей калибровки
+// 5 точек валидации — центр + 4 угла (другие координаты, не из калибровки)
+const VALIDATION_POINTS = [
+  { id: 'v0', xPct: 50, yPct: 50 },
+  { id: 'v1', xPct: 20, yPct: 20 },
+  { id: 'v2', xPct: 80, yPct: 20 },
+  { id: 'v3', xPct: 20, yPct: 80 },
+  { id: 'v4', xPct: 80, yPct: 80 },
+]
+
+const FOCUS_DELAY_MS  = 2000  // 2 сек держать взгляд
+const RECORD_REPEATS  = 10    // замеров на точку
+const RECORD_INTERVAL = 80    // мс между замерами
+// Порог точности: среднее отклонение в пикселях должно быть ниже этого
+const ACCURACY_THRESHOLD_PX = 120
 
 export default function CalibrationPage({ onComplete }) {
-  const [phase, setPhase]         = useState('intro')   // intro | calibrating | done
-  const [clicks, setClicks]       = useState({})        // { pointId: count }
-  const [activePoint, setActive]  = useState(0)
-  const [camOk, setCamOk]         = useState(false)
-  const [camError, setCamError]   = useState('')
-  const [wgReady, setWgReady]     = useState(false)
+  const [phase, setPhase]       = useState('intro')   // intro|calibrating|validating|result|done
+  const [activeIdx, setActive]  = useState(0)
+  const [doneIds, setDoneIds]   = useState(new Set())
+  const [camOk, setCamOk]       = useState(false)
+  const [camError, setCamError] = useState('')
+  const [focusState, setFocus]  = useState('waiting') // waiting|focusing|ready|recording
+  const [focusProgress, setFp]  = useState(0)
 
-  // ── Инициализация WebGazer ─────────────────────────────────────
+  // Валидация
+  const [valIdx, setValIdx]         = useState(0)
+  const [valFocus, setValFocus]     = useState('waiting')
+  const [valProgress, setValProg]   = useState(0)
+  const [valSamples, setValSamples] = useState([]) // { expected, measured }[]
+  const [accuracy, setAccuracy]     = useState(null) // среднее отклонение px
+
+  const rafRef      = useRef(null)
+  const valRafRef   = useRef(null)
+  const gazeRef     = useRef(null) // последние координаты WebGazer
+
+  const totalPoints = CALIBRATION_POINTS.length
+  const progress    = doneIds.size / totalPoints
+
+  // ── WebGazer init ────────────────────────────────────────────────────────────
   const initWebGazer = useCallback(async () => {
-    if (!window.webgazer) return;
-
+    if (!window.webgazer) return
     try {
-      // Запуск движка
-      await window.webgazer.begin();
-
-      // Отключаем всё лишнее программно
-      window.webgazer.showVideoPreview(false);
-      window.webgazer.showPredictionPoints(false);
-      window.webgazer.applyKalmanFilter(true);
-
-      // Принудительно прячем контейнер, если он создался
-      const container = document.getElementById('webgazerVideoContainer');
-      if (container) container.style.display = 'none';
-
-      setCamOk(true);
+      window.webgazer.saveDataAcrossSessions(false)
+      await window.webgazer.begin()
+      window.webgazer.showVideoPreview(false)
+      window.webgazer.showPredictionPoints(false)
+      window.webgazer.applyKalmanFilter(false)
+      const c = document.getElementById('webgazerVideoContainer')
+      if (c) c.style.display = 'none'
+      setCamOk(true)
     } catch (err) {
-      console.error("Ошибка камеры:", err);
+      setCamError('Не удалось подключить камеру: ' + err.message)
     }
-  }, []);
+  }, [])
 
-  // ── Клик по точке калибровки ───────────────────────────────────
-  const handlePointClick = useCallback((point, e) => {
-    if (phase !== 'calibrating') return
+  // ── Слушаем взгляд во время валидации ───────────────────────────────────────
+  useEffect(() => {
+    if (phase !== 'validating') return
+    if (!window.webgazer) return
+    window.webgazer.setGazeListener((data) => {
+      if (data) gazeRef.current = { x: data.x, y: data.y }
+    })
+    return () => {
+      if (window.webgazer) window.webgazer.setGazeListener(() => {})
+    }
+  }, [phase])
+
+  // ── Навели мышь на точку калибровки ─────────────────────────────────────────
+  const handleCalibEnter = useCallback(() => {
+    if (focusState !== 'waiting') return
+    setFocus('focusing')
+    setFp(0)
+    const start = performance.now()
+    const animate = () => {
+      const p = Math.min(1, (performance.now() - start) / FOCUS_DELAY_MS)
+      setFp(p)
+      if (p < 1) rafRef.current = requestAnimationFrame(animate)
+      else setFocus('ready')
+    }
+    rafRef.current = requestAnimationFrame(animate)
+  }, [focusState])
+
+  const handleCalibLeave = useCallback(() => {
+    if (focusState === 'recording') return
+    cancelAnimationFrame(rafRef.current)
+    setFocus('waiting')
+    setFp(0)
+  }, [focusState])
+
+  const handleCalibClick = useCallback((point) => {
+    if (phase !== 'calibrating' || focusState !== 'ready') return
+    setFocus('recording')
 
     const x = (point.xPct / 100) * window.innerWidth
     const y = (point.yPct / 100) * window.innerHeight
 
-    // Сообщаем WebGazer: пользователь смотрел сюда
-    if (window.webgazer) {
-      // Записываем несколько раз для лучшей калибровки
-      for (let i = 0; i < 3; i++) {
-        setTimeout(() => {
-          window.webgazer.recordScreenPosition(x, y, 'click')
-        }, i * 50)
-      }
+    for (let i = 0; i < RECORD_REPEATS; i++) {
+      setTimeout(() => {
+        if (window.webgazer) window.webgazer.recordScreenPosition(x, y, 'click')
+      }, i * RECORD_INTERVAL)
     }
 
-    setClicks(prev => {
-      const next = { ...prev, [point.id]: (prev[point.id] || 0) + 1 }
-
-      // Если точка набрала нужное кол-во кликов → переходим к следующей
-      if (next[point.id] >= CLICKS_REQUIRED) {
-        const nextActive = activePoint + 1
-        if (nextActive >= CALIBRATION_POINTS.length) {
-          // Все точки откалиброваны
-          setTimeout(() => setPhase('done'), 400)
-        } else {
-          setActive(nextActive)
-        }
+    setTimeout(() => {
+      setDoneIds(prev => { const n = new Set(prev); n.add(point.id); return n })
+      const nextIdx = activeIdx + 1
+      if (nextIdx >= CALIBRATION_POINTS.length) {
+        setTimeout(() => {
+          setPhase('validating')
+          setValIdx(0)
+          setValFocus('waiting')
+          setValProg(0)
+          setValSamples([])
+          gazeRef.current = null
+        }, 300)
+      } else {
+        setActive(nextIdx)
+        setFocus('waiting')
+        setFp(0)
       }
-      return next
-    })
-  }, [phase, activePoint])
+    }, RECORD_REPEATS * RECORD_INTERVAL + 100)
+  }, [phase, focusState, activeIdx])
 
-  // Считаем общий прогресс
-  const totalClicks = Object.values(clicks).reduce((a, b) => a + b, 0)
-  const totalRequired = CALIBRATION_POINTS.length * CLICKS_REQUIRED
-  const progress = Math.min(100, (totalClicks / totalRequired) * 100)
+  // ── Навели мышь на точку валидации ──────────────────────────────────────────
+  const handleValEnter = useCallback(() => {
+    if (valFocus !== 'waiting') return
+    setValFocus('focusing')
+    setValProg(0)
+    const start = performance.now()
+    const animate = () => {
+      const p = Math.min(1, (performance.now() - start) / FOCUS_DELAY_MS)
+      setValProg(p)
+      if (p < 1) valRafRef.current = requestAnimationFrame(animate)
+      else setValFocus('ready')
+    }
+    valRafRef.current = requestAnimationFrame(animate)
+  }, [valFocus])
 
+  const handleValLeave = useCallback(() => {
+    if (valFocus === 'recording') return
+    cancelAnimationFrame(valRafRef.current)
+    setValFocus('waiting')
+    setValProg(0)
+  }, [valFocus])
+
+  const handleValClick = useCallback((point) => {
+    if (phase !== 'validating' || valFocus !== 'ready') return
+    setValFocus('recording')
+
+    const ex = (point.xPct / 100) * window.innerWidth
+    const ey = (point.yPct / 100) * window.innerHeight
+    const measured = gazeRef.current || { x: ex, y: ey } // fallback
+
+    const newSamples = [...valSamples, { expected: { x: ex, y: ey }, measured }]
+
+    setTimeout(() => {
+      const nextIdx = valIdx + 1
+      if (nextIdx >= VALIDATION_POINTS.length) {
+        // Считаем среднее отклонение
+        const avgErr = newSamples.reduce((acc, s) => {
+          const dx = s.measured.x - s.expected.x
+          const dy = s.measured.y - s.expected.y
+          return acc + Math.sqrt(dx * dx + dy * dy)
+        }, 0) / newSamples.length
+
+        setAccuracy(Math.round(avgErr))
+        setValSamples(newSamples)
+        setPhase('result')
+      } else {
+        setValSamples(newSamples)
+        setValIdx(nextIdx)
+        setValFocus('waiting')
+        setValProg(0)
+        gazeRef.current = null
+      }
+    }, 400)
+  }, [phase, valFocus, valIdx, valSamples])
+
+  // Пересобрать калибровку
+  const recalibrate = useCallback(() => {
+    if (window.webgazer) {
+      window.webgazer.clearData()
+      window.webgazer.setGazeListener(() => {})
+    }
+    setPhase('calibrating')
+    setActive(0)
+    setDoneIds(new Set())
+    setFocus('waiting')
+    setFp(0)
+    setValIdx(0)
+    setValFocus('waiting')
+    setValProg(0)
+    setValSamples([])
+    setAccuracy(null)
+    gazeRef.current = null
+  }, [])
+
+  useEffect(() => () => {
+    cancelAnimationFrame(rafRef.current)
+    cancelAnimationFrame(valRafRef.current)
+  }, [])
+
+  // ── Рендер ──────────────────────────────────────────────────────────────────
   return (
       <div style={styles.root}>
 
+        {/* INTRO */}
         {phase === 'intro' && (
-            <div style={styles.introCard}>
-
+            <div style={styles.card}>
               <h1 style={styles.title}>Калибровка трекера взгляда</h1>
               <p style={styles.desc}>
-                Для точного отслеживания взгляда необходимо настроить систему.
-                Убедитесь, что камера направлена на лицо и вы находитесь
-                на расстоянии 50–70 см от экрана.
+                Для точного отслеживания необходимо пройти калибровку из 16 точек
+                и автоматическую проверку точности.
               </p>
               <ul style={styles.checklist}>
-                <CheckItem>Хорошее освещение лица</CheckItem>
-                <CheckItem>Камера на уровне глаз</CheckItem>
-                <CheckItem>Голова прямо, без очков (по возможности)</CheckItem>
-                <CheckItem>9 точек × {CLICKS_REQUIRED} кликов = ~60 секунд</CheckItem>
+                <CheckItem>Хорошее освещение лица спереди</CheckItem>
+                <CheckItem>Камера строго на уровне глаз, 50–70 см</CheckItem>
+                <CheckItem>Голова неподвижна, без очков по возможности</CheckItem>
+                <CheckItem>Наведите курсор → подождите кольцо (2 с) → кликните</CheckItem>
+                <CheckItem>После калибровки — автоматическая проверка точности</CheckItem>
               </ul>
-
               {camError && <div style={styles.errBox}>{camError}</div>}
-
-              {!camOk ? (
-                  <button style={styles.btnPrimary} onClick={initWebGazer}>
-                    ВКЛЮЧИТЬ КАМЕРУ →
-                  </button>
-              ) : (
-                  <button style={styles.btnPrimary} onClick={() => setPhase('calibrating')}>
-                    НАЧАТЬ КАЛИБРОВКУ →
-                  </button>
-              )}
-
-              {camOk && (
-                  <div style={styles.camOk}>
-                    <span style={styles.dot} /> Камера подключена
-                  </div>
-              )}
+              {!camOk
+                  ? <button style={styles.btn} onClick={initWebGazer}>ВКЛЮЧИТЬ КАМЕРУ →</button>
+                  : <button style={styles.btn} onClick={() => setPhase('calibrating')}>НАЧАТЬ КАЛИБРОВКУ →</button>
+              }
+              {camOk && <div style={styles.camOk}><span style={styles.dot} /> Камера подключена</div>}
             </div>
         )}
 
-        {/* ── КАЛИБРОВКА ── */}
+        {/* КАЛИБРОВКА */}
         {phase === 'calibrating' && (
             <>
-              {/* Инструкция сверху */}
               <div style={styles.topBar}>
             <span style={styles.topBarText}>
-              Кликайте по светящейся точке {CLICKS_REQUIRED} раза, глядя на неё
+              {focusState === 'waiting'  && 'Наведите курсор на светящуюся точку и держите взгляд'}
+              {focusState === 'focusing' && 'Держите взгляд на точке…'}
+              {focusState === 'ready'    && '✓ Взгляд зафиксирован — кликните!'}
+              {focusState === 'recording'&& 'Записываю данные…'}
             </span>
                 <div style={styles.progressWrap}>
-                  <div style={{ ...styles.progressFill, width: `${progress}%` }} />
+                  <div style={{ ...styles.progressFill, width: `${progress * 100}%` }} />
                 </div>
-                <span style={styles.topBarProgress}>{Math.round(progress)}%</span>
+                <span style={styles.progressLabel}>{doneIds.size} / {totalPoints}</span>
               </div>
 
-              {/* Точки */}
               {CALIBRATION_POINTS.map((pt) => {
-                const ptClicks  = clicks[pt.id] || 0
-                const isDone    = ptClicks >= CLICKS_REQUIRED
-                const isActive  = pt.id === activePoint
-                const fillPct   = Math.min(1, ptClicks / CLICKS_REQUIRED)
-
+                const isDone   = doneIds.has(pt.id)
+                const isActive = pt.id === CALIBRATION_POINTS[activeIdx]?.id && !isDone
                 return (
-                    <CalibPoint
+                    <CalibDot
                         key={pt.id}
                         point={pt}
-                        isActive={isActive}
                         isDone={isDone}
-                        fillPct={fillPct}
-                        onClick={(e) => isActive && handlePointClick(pt, e)}
+                        isActive={isActive}
+                        focusState={isActive ? focusState : 'waiting'}
+                        focusProgress={isActive ? focusProgress : 0}
+                        onEnter={isActive ? handleCalibEnter : undefined}
+                        onLeave={isActive ? handleCalibLeave : undefined}
+                        onClick={isActive ? () => handleCalibClick(pt) : undefined}
                     />
                 )
               })}
 
-              {/* Счётчик текущей точки */}
-              <div style={styles.pointCounter}>
-                Точка {activePoint + 1} / {CALIBRATION_POINTS.length} —
-                кликов: {clicks[activePoint] || 0} / {CLICKS_REQUIRED}
+              <div style={styles.counter}>
+                Точка {activeIdx + 1} / {totalPoints}
               </div>
             </>
         )}
 
-        {/* ── ГОТОВО ── */}
-        {phase === 'done' && (
-            <div style={styles.doneCard}>
-              <div style={styles.doneIcon}>✓</div>
-              <h2 style={styles.doneTitle}>Калибровка завершена</h2>
-              <p style={styles.doneDesc}>
-                Система настроена и готова к сеансу исследования.
-                WebGazer сохранил модель в памяти браузера — не перезагружайте страницу.
+        {/* ВАЛИДАЦИЯ */}
+        {phase === 'validating' && (
+            <>
+              <div style={styles.topBar}>
+            <span style={styles.topBarText}>
+              {valFocus === 'waiting'   && `Проверка точности: наведите взгляд и курсор на точку (${valIdx + 1}/5)`}
+              {valFocus === 'focusing'  && 'Держите взгляд…'}
+              {valFocus === 'ready'     && '✓ Кликните!'}
+              {valFocus === 'recording' && 'Измеряю отклонение…'}
+            </span>
+                <div style={styles.progressWrap}>
+                  <div style={{ ...styles.progressFill,
+                    background: 'linear-gradient(90deg,rgba(255,196,0,0.5),#ffc400)',
+                    width: `${(valIdx / VALIDATION_POINTS.length) * 100}%` }} />
+                </div>
+                <span style={{ ...styles.progressLabel, color: '#ffc400' }}>
+              {valIdx} / {VALIDATION_POINTS.length}
+            </span>
+              </div>
+
+              {VALIDATION_POINTS.map((pt, i) => {
+                if (i < valIdx) return null // уже пройдена
+                if (i > valIdx) return null // ещё не дошли
+                return (
+                    <CalibDot
+                        key={pt.id}
+                        point={pt}
+                        isDone={false}
+                        isActive={true}
+                        focusState={valFocus}
+                        focusProgress={valProgress}
+                        color="#ffc400"
+                        onEnter={handleValEnter}
+                        onLeave={handleValLeave}
+                        onClick={() => handleValClick(pt)}
+                    />
+                )
+              })}
+
+              <div style={styles.counter}>Проверка точности: точка {valIdx + 1} / {VALIDATION_POINTS.length}</div>
+            </>
+        )}
+
+        {/* РЕЗУЛЬТАТ ВАЛИДАЦИИ */}
+        {phase === 'result' && (
+            <div style={styles.card}>
+              <div style={{
+                ...styles.resultIcon,
+                background: accuracy <= ACCURACY_THRESHOLD_PX ? 'var(--mint,#3dffa0)' : '#ff4567',
+              }}>
+                {accuracy <= ACCURACY_THRESHOLD_PX ? '✓' : '✗'}
+              </div>
+              <h2 style={styles.title}>
+                {accuracy <= ACCURACY_THRESHOLD_PX ? 'Калибровка прошла успешно' : 'Точность недостаточна'}
+              </h2>
+              <p style={styles.desc}>
+                Среднее отклонение взгляда: <strong style={{
+                color: accuracy <= ACCURACY_THRESHOLD_PX ? 'var(--mint,#3dffa0)' : '#ff4567'
+              }}>{accuracy} px</strong>
+                {accuracy <= ACCURACY_THRESHOLD_PX
+                    ? ` — отлично! Система готова к работе.`
+                    : ` — слишком много (порог ${ACCURACY_THRESHOLD_PX} px). Попробуйте пройти калибровку ещё раз, смотря точно на точки.`
+                }
               </p>
-              <button style={styles.btnPrimary} onClick={onComplete}>
-                ПЕРЕЙТИ К ИССЛЕДОВАНИЮ →
-              </button>
+
+              {/* Визуализация отклонений */}
+              <AccuracyMap samples={valSamples} />
+
+              {accuracy <= ACCURACY_THRESHOLD_PX
+                  ? <button style={styles.btn} onClick={onComplete}>ПЕРЕЙТИ К ИССЛЕДОВАНИЮ →</button>
+                  : <button style={styles.btn} onClick={recalibrate}>↺ ПОВТОРИТЬ КАЛИБРОВКУ</button>
+              }
+              {accuracy <= ACCURACY_THRESHOLD_PX && (
+                  <button style={{ ...styles.btn, marginTop: 10,
+                    borderColor: '#1e2533', color: '#556' }} onClick={recalibrate}>
+                    ↺ Перекалибровать заново
+                  </button>
+              )}
             </div>
         )}
 
         <style>{`
-        .calib-btn-primary:hover {
-          background: var(--mint) !important;
-          color: var(--bg-void) !important;
+        @keyframes pulse-ring {
+          0%   { transform: scale(1);   opacity: 0.6; }
+          100% { transform: scale(2);   opacity: 0; }
+        }
+        @keyframes fade-in {
+          from { opacity: 0; transform: translateY(8px); }
+          to   { opacity: 1; transform: translateY(0); }
         }
       `}</style>
       </div>
   )
 }
 
-// ── Компонент точки калибровки ─────────────────────────────────────────────
-function CalibPoint({ point, isActive, isDone, fillPct, onClick }) {
-  const size = 36
+// ── Компонент точки (используется и для калибровки, и для валидации) ──────────
+function CalibDot({ point, isDone, isActive, focusState, focusProgress, color = 'var(--mint,#3dffa0)', onEnter, onLeave, onClick }) {
+  const size = 44
+  const r    = size / 2 - 5
+  const circ = 2 * Math.PI * r
+  const dash = focusProgress * circ
 
-  const baseStyle = {
+  const dotColor = focusState === 'ready' ? color : `rgba(61,255,160,${0.3 + focusProgress * 0.7})`
+
+  const base = {
     position: 'absolute',
-    left:   `${point.xPct}%`,
-    top:    `${point.yPct}%`,
-    transform: 'translate(-50%, -50%)',
-    width:  size, height: size,
-    borderRadius: '50%',
-    cursor: isActive ? 'crosshair' : 'default',
-    transition: 'transform 0.15s, box-shadow 0.15s',
-    zIndex: 10,
+    left: `${point.xPct}%`, top: `${point.yPct}%`,
+    transform: 'translate(-50%,-50%)',
+    width: size, height: size, borderRadius: '50%',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
+    zIndex: 10,
   }
 
-  if (isDone) {
-    return (
-        <div style={{ ...baseStyle, background: 'var(--mint)', boxShadow: '0 0 12px var(--mint)' }}>
-          <span style={{ color: '#000', fontSize: 16, fontWeight: 700 }}>✓</span>
-        </div>
-    )
-  }
+  if (isDone) return (
+      <div style={{ ...base, background: color, boxShadow: `0 0 14px ${color}` }}>
+        <span style={{ color: '#000', fontSize: 18, fontWeight: 700 }}>✓</span>
+      </div>
+  )
 
-  if (isActive) {
-    return (
-        <div style={baseStyle} onClick={onClick}>
-          {/* Пульсирующее кольцо */}
-          <div style={{
-            position: 'absolute',
-            width: size, height: size,
-            borderRadius: '50%',
-            border: '2px solid var(--mint)',
-            animation: 'pulse-ring 1.2s ease-out infinite',
-          }} />
-          {/* Заполняющийся круг по прогрессу */}
-          <svg width={size} height={size} style={{ position: 'absolute' }}>
-            <circle
-                cx={size/2} cy={size/2} r={size/2 - 2}
-                fill={`rgba(61,255,160,${fillPct * 0.3})`}
-                stroke="var(--mint)"
-                strokeWidth="2"
-            />
-            {/* Дуга прогресса */}
-            <circle
-                cx={size/2} cy={size/2} r={size/2 - 6}
-                fill="none"
-                stroke="var(--mint)"
-                strokeWidth="3"
-                strokeDasharray={`${fillPct * 2 * Math.PI * (size/2 - 6)} 999`}
-                strokeLinecap="round"
-                transform={`rotate(-90 ${size/2} ${size/2})`}
-            />
-          </svg>
-          {/* Центральная точка */}
-          <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--mint)', zIndex: 1 }} />
-        </div>
-    )
-  }
+  if (isActive) return (
+      <div style={{ ...base, cursor: focusState === 'ready' ? 'crosshair' : 'default' }}
+           onMouseEnter={onEnter} onMouseLeave={onLeave} onClick={onClick}>
+        {focusState === 'waiting' && (
+            <div style={{
+              position: 'absolute', width: size, height: size, borderRadius: '50%',
+              border: `2px solid ${color}`, opacity: 0.5,
+              animation: 'pulse-ring 1.4s ease-out infinite',
+            }} />
+        )}
+        <svg width={size} height={size} style={{ position: 'absolute' }}>
+          <circle cx={size/2} cy={size/2} r={r} fill="none"
+                  stroke="rgba(61,255,160,0.1)" strokeWidth="3" />
+          <circle cx={size/2} cy={size/2} r={r} fill="none"
+                  stroke={dotColor} strokeWidth="3"
+                  strokeDasharray={`${dash} ${circ}`}
+                  strokeLinecap="round"
+                  transform={`rotate(-90 ${size/2} ${size/2})`}
+                  style={{ transition: 'stroke 0.2s' }} />
+        </svg>
+        <div style={{
+          width: 8, height: 8, borderRadius: '50%', background: dotColor, zIndex: 1,
+          boxShadow: focusState === 'ready' ? `0 0 10px ${color}` : 'none',
+          transition: 'background 0.2s, box-shadow 0.2s',
+        }} />
+      </div>
+  )
 
-  // Неактивная точка
   return (
-      <div style={{ ...baseStyle, opacity: 0.25 }}>
-        <div style={{ width: 10, height: 10, borderRadius: '50%', border: '1.5px solid var(--text-dim)' }} />
+      <div style={{ ...base, opacity: 0.18 }}>
+        <div style={{ width: 10, height: 10, borderRadius: '50%', border: '1.5px solid #556' }} />
       </div>
   )
 }
 
-function AnimatedEye() {
+// ── Мини-карта отклонений ────────────────────────────────────────────────────
+function AccuracyMap({ samples }) {
+  const W = 280, H = 160
   return (
-      <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
-        <ellipse cx="40" cy="40" rx="35" ry="22" stroke="#3dffa0" strokeWidth="2" opacity="0.4"/>
-        <ellipse cx="40" cy="40" rx="35" ry="22" stroke="#3dffa0" strokeWidth="1.5"
-                 strokeDasharray="4 6" style={{ animation: 'spin 12s linear infinite', transformOrigin: '40px 40px' }}/>
-        <circle cx="40" cy="40" r="14" stroke="#3dffa0" strokeWidth="1.5"/>
-        <circle cx="40" cy="40" r="7" fill="#3dffa0" opacity="0.8"/>
-        <circle cx="44" cy="36" r="2.5" fill="white" opacity="0.9"/>
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      </svg>
+      <div style={{ margin: '20px auto', width: W }}>
+        <svg width={W} height={H} style={{ background: '#07090f', borderRadius: 8, border: '1px solid #1e2533' }}>
+          {samples.map((s, i) => {
+            const ex = (s.expected.x / window.innerWidth)  * W
+            const ey = (s.expected.y / window.innerHeight) * H
+            const mx = (s.measured.x / window.innerWidth)  * W
+            const my = (s.measured.y / window.innerHeight) * H
+            return (
+                <g key={i}>
+                  <line x1={ex} y1={ey} x2={mx} y2={my} stroke="#ff4567" strokeWidth="1" opacity="0.6" />
+                  <circle cx={ex} cy={ey} r={4} fill="#3dffa0" />
+                  <circle cx={mx} cy={my} r={3} fill="#ff4567" opacity="0.8" />
+                </g>
+            )
+          })}
+        </svg>
+        <div style={{ fontSize: 10, color: '#445', textAlign: 'center', marginTop: 6 }}>
+          <span style={{ color: '#3dffa0' }}>●</span> ожидаемое &nbsp;
+          <span style={{ color: '#ff4567' }}>●</span> измеренное
+        </div>
+      </div>
   )
 }
 
 function CheckItem({ children }) {
   return (
-      <li style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, color: 'var(--text-dim)', fontSize: 13 }}>
-        <span style={{ color: 'var(--mint)', fontSize: 16 }}>›</span>
+      <li style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10,
+        color: 'var(--text-dim,#667)', fontSize: 13 }}>
+        <span style={{ color: 'var(--mint,#3dffa0)', fontSize: 16, flexShrink: 0 }}>›</span>
         {children}
       </li>
   )
 }
 
+// ── Styles ───────────────────────────────────────────────────────────────────
 const styles = {
   root: {
     width: '100%', height: '100%',
-    background: 'var(--bg-void)',
-    position: 'relative',
-    overflow: 'hidden',
+    background: 'var(--bg-void,#05080f)',
+    position: 'relative', overflow: 'hidden',
     backgroundImage: `
       radial-gradient(ellipse at 50% 50%, rgba(61,255,160,0.03) 0%, transparent 70%),
-      linear-gradient(var(--border) 1px, transparent 1px),
-      linear-gradient(90deg, var(--border) 1px, transparent 1px)
+      linear-gradient(rgba(30,37,51,0.4) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(30,37,51,0.4) 1px, transparent 1px)
     `,
     backgroundSize: 'auto, 60px 60px, 60px 60px',
   },
-  introCard: {
-    position: 'absolute',
-    top: '50%', left: '50%',
-    transform: 'translate(-50%, -50%)',
-    background: 'var(--bg-panel)',
-    border: '1px solid var(--border-lit)',
-    borderRadius: 'var(--radius-lg)',
-    padding: 48,
-    width: 480,
-    animation: 'fade-in 0.4s ease',
+  card: {
+    position: 'absolute', top: '50%', left: '50%',
+    transform: 'translate(-50%,-50%)',
+    background: 'var(--bg-panel,#0a0f1a)',
+    border: '1px solid #1e2533', borderRadius: 12,
+    padding: 44, width: 500, animation: 'fade-in 0.4s ease',
   },
-  eyeAnim: { textAlign: 'center', marginBottom: 24 },
   title: {
-    fontFamily: 'var(--font-display)',
-    fontSize: 22, fontWeight: 700,
-    color: 'var(--text-prime)',
-    marginBottom: 16,
-    textAlign: 'center',
+    fontFamily: 'monospace', fontSize: 20, fontWeight: 700,
+    color: '#c8d0e0', marginBottom: 14, textAlign: 'center',
   },
-  desc: {
-    color: 'var(--text-dim)',
-    fontSize: 13, lineHeight: 1.7,
-    marginBottom: 24,
-    textAlign: 'center',
-  },
+  desc: { color: '#667', fontSize: 13, lineHeight: 1.7, marginBottom: 20, textAlign: 'center' },
   checklist: {
-    listStyle: 'none',
-    marginBottom: 28,
-    background: 'var(--bg-deep)',
-    borderRadius: 'var(--radius)',
-    padding: '16px 20px',
-    border: '1px solid var(--border)',
+    listStyle: 'none', marginBottom: 24,
+    background: '#07090f', borderRadius: 8,
+    padding: '14px 18px', border: '1px solid #1e2533',
   },
   errBox: {
-    marginBottom: 16,
-    padding: '12px 16px',
-    background: 'rgba(255,69,103,0.1)',
-    border: '1px solid rgba(255,69,103,0.3)',
-    borderRadius: 'var(--radius)',
-    color: 'var(--red)',
-    fontSize: 12,
+    marginBottom: 14, padding: '10px 14px',
+    background: 'rgba(255,69,103,0.1)', border: '1px solid rgba(255,69,103,0.3)',
+    borderRadius: 8, color: '#ff4567', fontSize: 12,
   },
-  btnPrimary: {
-    width: '100%',
-    padding: '14px',
-    background: 'transparent',
-    border: '1px solid var(--mint)',
-    borderRadius: 'var(--radius)',
-    color: 'var(--mint)',
-    fontFamily: 'var(--font-mono)',
-    fontSize: 13, fontWeight: 500,
-    letterSpacing: '0.08em',
-    cursor: 'pointer',
-    transition: 'all 0.2s',
+  btn: {
+    display: 'block', width: '100%', padding: 14, marginTop: 0,
+    background: 'transparent', border: '1px solid var(--mint,#3dffa0)',
+    borderRadius: 6, color: 'var(--mint,#3dffa0)',
+    fontFamily: 'monospace', fontSize: 13, letterSpacing: '0.08em',
+    cursor: 'pointer', transition: 'all 0.2s',
   },
   camOk: {
-    marginTop: 16,
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    gap: 8, color: 'var(--mint)', fontSize: 12,
+    marginTop: 14, display: 'flex', alignItems: 'center',
+    justifyContent: 'center', gap: 8, color: 'var(--mint,#3dffa0)', fontSize: 12,
   },
   dot: {
-    display: 'inline-block',
-    width: 7, height: 7, borderRadius: '50%',
-    background: 'var(--mint)',
-    boxShadow: '0 0 6px var(--mint)',
+    display: 'inline-block', width: 7, height: 7,
+    borderRadius: '50%', background: 'var(--mint,#3dffa0)',
+    boxShadow: '0 0 6px var(--mint,#3dffa0)',
   },
   topBar: {
-    position: 'fixed',
-    top: 0, left: 0, right: 0,
-    background: 'var(--bg-panel)',
-    borderBottom: '1px solid var(--border)',
-    padding: '10px 24px',
-    display: 'flex', alignItems: 'center', gap: 16,
-    zIndex: 100,
+    position: 'fixed', top: 0, left: 0, right: 0,
+    background: '#0a0f1a', borderBottom: '1px solid #1e2533',
+    padding: '10px 24px', display: 'flex', alignItems: 'center', gap: 16, zIndex: 100,
   },
-  topBarText: {
-    color: 'var(--text-dim)', fontSize: 12,
-    letterSpacing: '0.06em', flexShrink: 0,
-  },
-  progressWrap: {
-    flex: 1, height: 3, background: 'var(--bg-deep)',
-    borderRadius: 2, overflow: 'hidden',
-  },
+  topBarText: { color: '#667', fontSize: 12, letterSpacing: '0.05em', flexShrink: 0, minWidth: 360 },
+  progressWrap: { flex: 1, height: 3, background: '#07090f', borderRadius: 2, overflow: 'hidden' },
   progressFill: {
     height: '100%',
-    background: 'linear-gradient(90deg, var(--mint-dim), var(--mint))',
-    borderRadius: 2,
-    transition: 'width 0.3s ease',
+    background: 'linear-gradient(90deg,rgba(61,255,160,0.4),#3dffa0)',
+    borderRadius: 2, transition: 'width 0.4s ease',
   },
-  topBarProgress: {
-    color: 'var(--mint)', fontSize: 11,
-    fontWeight: 500, flexShrink: 0,
+  progressLabel: { color: 'var(--mint,#3dffa0)', fontSize: 11, fontWeight: 500, flexShrink: 0 },
+  counter: {
+    position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)',
+    background: '#0a0f1a', border: '1px solid #1e2533', borderRadius: 8,
+    padding: '8px 20px', fontSize: 11, color: '#667', letterSpacing: '0.06em', zIndex: 100,
   },
-  pointCounter: {
-    position: 'fixed',
-    bottom: 16, left: '50%',
-    transform: 'translateX(-50%)',
-    background: 'var(--bg-panel)',
-    border: '1px solid var(--border)',
-    borderRadius: 'var(--radius)',
-    padding: '8px 20px',
-    fontSize: 11,
-    color: 'var(--text-dim)',
-    letterSpacing: '0.06em',
-    zIndex: 100,
-  },
-  doneCard: {
-    position: 'absolute',
-    top: '50%', left: '50%',
-    transform: 'translate(-50%, -50%)',
-    background: 'var(--bg-panel)',
-    border: '1px solid var(--mint-dim)',
-    boxShadow: '0 0 40px var(--mint-glow)',
-    borderRadius: 'var(--radius-lg)',
-    padding: 48, width: 440,
-    textAlign: 'center',
-    animation: 'fade-in 0.4s ease',
-  },
-  doneIcon: {
+  resultIcon: {
     width: 64, height: 64, borderRadius: '50%',
-    background: 'var(--mint)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     fontSize: 28, fontWeight: 700, color: '#000',
-    margin: '0 auto 24px',
-    boxShadow: '0 0 30px var(--mint-glow)',
-  },
-  doneTitle: {
-    fontFamily: 'var(--font-display)',
-    fontSize: 22, fontWeight: 700,
-    color: 'var(--text-prime)',
-    marginBottom: 12,
-  },
-  doneDesc: {
-    color: 'var(--text-dim)',
-    fontSize: 13, lineHeight: 1.7,
-    marginBottom: 28,
+    margin: '0 auto 20px', boxShadow: '0 0 30px rgba(61,255,160,0.2)',
   },
 }
